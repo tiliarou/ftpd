@@ -26,6 +26,9 @@
 #ifdef _3DS
 #include <3ds.h>
 #define lstat stat
+#elif defined(__SWITCH__)
+#include <switch.h>
+#define lstat stat
 #else
 #include <stdbool.h>
 #define BIT(x) (1<<(x))
@@ -34,12 +37,23 @@
 
 #define POLL_UNKNOWN    (~(POLLIN|POLLPRI|POLLOUT))
 
+#ifndef __SWITCH__
 #define XFER_BUFFERSIZE 32768
 #define SOCK_BUFFERSIZE 32768
 #define FILE_BUFFERSIZE 65536
 #define CMD_BUFFERSIZE  4096
+#else
+/* we have a lot of memory to waste on the Switch */
+#define XFER_BUFFERSIZE 65536
+#define SOCK_BUFFERSIZE 65536
+#define FILE_BUFFERSIZE 1048576
+#define CMD_BUFFERSIZE  4096
+#endif
+
+#ifdef _3DS
 #define SOCU_ALIGN      0x1000
 #define SOCU_BUFFERSIZE 0x100000
+#endif
 #define LISTEN_PORT     5000
 #ifdef _3DS
 #define DATA_PORT       (LISTEN_PORT+1)
@@ -252,6 +266,10 @@ static bool lcd_power = true;
 
 /*! aptHook cookie */
 static aptHookCookie cookie;
+#elif defined(__SWITCH__)
+
+/*! appletHook cookie */
+static AppletHookCookie cookie;
 #endif
 
 /*! server listen address */
@@ -360,6 +378,8 @@ ftp_closesocket(int  fd,
   struct sockaddr_in addr;
   socklen_t          addrlen = sizeof(addr);
   struct pollfd      pollinfo;
+
+//  console_print("0x%X\n", socketGetLastBsdResult());
 
   if(connected)
   {
@@ -730,7 +750,7 @@ ftp_session_fill_dirent_type(ftp_session_t *session, const struct stat *st,
           type = "file";
         else if(S_ISDIR(st->st_mode))
           type = "dir";
-#ifndef _3DS
+#if !defined(_3DS) && !defined(__SWITCH__)
         else if(S_ISLNK(st->st_mode))
           type = "os.unix=symlink";
         else if(S_ISCHR(st->st_mode))
@@ -842,7 +862,7 @@ ftp_session_fill_dirent_type(ftp_session_t *session, const struct stat *st,
               "%c%c%c%c%c%c%c%c%c%c %lu 3DS 3DS %lld ",
               S_ISREG(st->st_mode)  ? '-' :
               S_ISDIR(st->st_mode)  ? 'd' :
-#ifndef _3DS
+#if !defined(_3DS) && !defined(__SWITCH__)
               S_ISLNK(st->st_mode)  ? 'l' :
               S_ISCHR(st->st_mode)  ? 'c' :
               S_ISBLK(st->st_mode)  ? 'b' :
@@ -1738,7 +1758,7 @@ ftp_session_poll(ftp_session_t *session)
 static void
 update_free_space(void)
 {
-#ifdef _3DS
+#if defined(_3DS) || defined(__SWITCH__)
 #define KiB (1024.0)
 #define MiB (1024.0*KiB)
 #define GiB (1024.0*MiB)
@@ -1784,7 +1804,7 @@ update_free_space(void)
 static int
 update_status(void)
 {
-#ifdef _3DS
+#if defined(_3DS) || defined(__SWITCH__)
   console_set_status("\n" GREEN STATUS_STRING " "
 #ifdef ENABLE_LOGGING
                      "DEBUG "
@@ -1862,6 +1882,25 @@ apt_hook(APT_HookType type,
       break;
   }
 }
+#elif defined(__SWITCH__)
+/*! Handle applet events
+ *
+ *  @param[in] type    Event type
+ *  @param[in] closure Callback closure
+ */
+static void
+applet_hook(AppletHookType type,
+         void         *closure)
+{
+  (void)closure;
+  (void)type;
+  /* stubbed for now */
+  switch(type)
+  {
+    default:
+      break;
+  }
+}
 #endif
 
 /*! initialize ftp subsystem */
@@ -1923,9 +1962,33 @@ ftp_init(void)
   ret = socInit(SOCU_buffer, SOCU_BUFFERSIZE);
   if(ret != 0)
   {
-    console_print(RED "socInit: 0x%08X\n" RESET, (unsigned int)ret);
+    console_print(RED "socInit: %08X\n" RESET, (unsigned int)ret);
     goto soc_fail;
   }
+#elif defined(__SWITCH__)
+  static const SocketInitConfig socketInitConfig = {
+    .bsdsockets_version = 1,
+
+    .tcp_tx_buf_size        = 8 * SOCK_BUFFERSIZE,
+    .tcp_rx_buf_size        = 8 * SOCK_BUFFERSIZE,
+    .tcp_tx_buf_max_size    = 16 * SOCK_BUFFERSIZE,
+    .tcp_rx_buf_max_size    = 16 * SOCK_BUFFERSIZE,
+
+    .udp_tx_buf_size = 0x2400,
+    .udp_rx_buf_size = 0xA500,
+
+    .sb_efficiency = 8,
+  };
+
+  Result ret = socketInitialize(&socketInitConfig);
+  if(ret != 0)
+  {
+    console_print(RED "socketInitialize: %X\n" RESET, (unsigned int)ret);
+    return -1;
+  }
+
+  /* register applet hook */
+  appletHook(&cookie, applet_hook, NULL);
 #endif
 
   /* allocate socket to listen for clients */
@@ -1939,7 +2002,7 @@ ftp_init(void)
 
   /* get address to listen on */
   serv_addr.sin_family      = AF_INET;
-#ifdef _3DS
+#if defined(_3DS) || defined(__SWITCH__)
   serv_addr.sin_addr.s_addr = gethostid();
   serv_addr.sin_port        = htons(LISTEN_PORT);
 #else
@@ -2001,7 +2064,7 @@ memalign_fail:
 void
 ftp_exit(void)
 {
-#ifdef _3DS
+#if defined(_3DS)
   Result ret;
 #endif
 
@@ -2027,6 +2090,13 @@ ftp_exit(void)
       console_print(RED "socExit: 0x%08X\n" RESET, (unsigned int)ret);
     free(SOCU_buffer);
   }
+#elif defined(__SWITCH__)
+  /* deinitialize socket driver */
+  console_render();
+  console_print(CYAN "Waiting for socketExit()...\n" RESET);
+
+  socketExit();
+
 #endif
 }
 
@@ -2089,6 +2159,13 @@ ftp_loop(void)
     lcd_power = !lcd_power;
     apt_hook(APTHOOK_ONRESTORE, NULL);
   }
+#elif defined(__SWITCH__)
+  /* check if the user wants to exit */
+  hidScanInput();
+  u32 down = hidKeysDown(CONTROLLER_P1_AUTO);
+
+  if(down & KEY_B)
+    return LOOP_EXIT;
 #endif
 
   return LOOP_CONTINUE;
@@ -2921,7 +2998,7 @@ FTP_DECLARE(CWD)
 
   /* copy the path into the cwd */
   strncpy(session->cwd, session->buffer, sizeof(session->cwd));
-
+  session->cwd[sizeof(session->cwd)-1] = '\0';
   ftp_send_response(session, 200, "OK\r\n");
 }
 
@@ -3401,7 +3478,7 @@ FTP_DECLARE(PASV)
   /* grab a new port */
   session->pasv_addr.sin_port = htons(next_data_port());
 
-#ifdef _3DS
+#if defined(_3DS) || defined(__SWITCH__)
   console_print(YELLOW "binding to %s:%u\n" RESET,
                 inet_ntoa(session->pasv_addr.sin_addr),
                 ntohs(session->pasv_addr.sin_port));
